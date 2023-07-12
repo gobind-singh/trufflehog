@@ -33,6 +33,7 @@ type Commit struct {
 	Date    time.Time
 	Message strings.Builder
 	Diffs   []Diff
+	Size    int // in bytes
 }
 
 // Diff contains the info about a file diff in a commit.
@@ -117,7 +118,7 @@ func (c1 *Commit) Equal(c2 *Commit) bool {
 
 // RepoPath parses the output of the `git log` command for the `source` path.
 func (c *Parser) RepoPath(ctx context.Context, source string, head string, abbreviatedLog bool, excludedGlobs []string) (chan Commit, error) {
-	args := []string{"-C", source, "log", "-p", "-U5", "--full-history", "--date=format:%a %b %d %H:%M:%S %Y %z"}
+	args := []string{"-C", source, "log", "-p", "--full-history", "--date=format:%a %b %d %H:%M:%S %Y %z"}
 	if abbreviatedLog {
 		args = append(args, "--diff-filter=AM")
 	}
@@ -139,10 +140,10 @@ func (c *Parser) RepoPath(ctx context.Context, source string, head string, abbre
 	return c.executeCommand(ctx, cmd)
 }
 
-// Unstaged parses the output of the `git diff` command for the `source` path.
-func (c *Parser) Unstaged(ctx context.Context, source string) (chan Commit, error) {
+// Staged parses the output of the `git diff` command for the `source` path.
+func (c *Parser) Staged(ctx context.Context, source string) (chan Commit, error) {
 	// Provide the --cached flag to diff to get the diff of the staged changes.
-	args := []string{"-C", source, "diff", "-p", "-U5", "--cached", "--full-history", "--diff-filter=AM", "--date=format:%a %b %d %H:%M:%S %Y %z", "HEAD"}
+	args := []string{"-C", source, "diff", "-p", "--cached", "--full-history", "--diff-filter=AM", "--date=format:%a %b %d %H:%M:%S %Y %z"}
 
 	cmd := exec.Command("git", args...)
 
@@ -180,7 +181,7 @@ func (c *Parser) executeCommand(ctx context.Context, cmd *exec.Cmd) (chan Commit
 	}()
 
 	go func() {
-		c.fromReader(ctx, stdOut, commitChan)
+		c.FromReader(ctx, stdOut, commitChan)
 		if err := cmd.Wait(); err != nil {
 			ctx.Logger().V(2).Info("Error waiting for git command to complete.", "error", err)
 		}
@@ -189,10 +190,14 @@ func (c *Parser) executeCommand(ctx context.Context, cmd *exec.Cmd) (chan Commit
 	return commitChan, nil
 }
 
-func (c *Parser) fromReader(ctx context.Context, stdOut io.Reader, commitChan chan Commit) {
+func (c *Parser) FromReader(ctx context.Context, stdOut io.Reader, commitChan chan Commit) {
 	outReader := bufio.NewReader(stdOut)
-	var currentCommit *Commit
-	var currentDiff *Diff
+	var (
+		currentCommit        *Commit
+		currentDiff          *Diff
+		recentlyPassedAuthor bool
+		totalLogSize         int
+	)
 
 	defer common.RecoverWithExit(ctx)
 	defer close(commitChan)
@@ -209,10 +214,12 @@ func (c *Parser) fromReader(ctx context.Context, stdOut io.Reader, commitChan ch
 			// If there is a currentDiff, add it to currentCommit.
 			if currentDiff != nil && currentDiff.Content.Len() > 0 {
 				currentCommit.Diffs = append(currentCommit.Diffs, *currentDiff)
+				currentCommit.Size += currentDiff.Content.Len()
 			}
 			// If there is a currentCommit, send it to the channel.
 			if currentCommit != nil {
 				commitChan <- *currentCommit
+				totalLogSize += currentCommit.Size
 			}
 			// Create a new currentDiff and currentCommit
 			currentDiff = &Diff{}
@@ -225,6 +232,7 @@ func (c *Parser) fromReader(ctx context.Context, stdOut io.Reader, commitChan ch
 			}
 		case isAuthorLine(line):
 			currentCommit.Author = strings.TrimRight(string(line[8:]), "\n")
+			recentlyPassedAuthor = true
 		case isDateLine(line):
 			date, err := time.Parse(c.dateFormat, strings.TrimSpace(string(line[6:])))
 			if err != nil {
@@ -246,6 +254,7 @@ func (c *Parser) fromReader(ctx context.Context, stdOut io.Reader, commitChan ch
 				if totalSize > c.maxCommitSize {
 					oldCommit := currentCommit
 					commitChan <- *currentCommit
+					totalLogSize += currentCommit.Size
 					currentCommit = &Commit{
 						Hash:    currentCommit.Hash,
 						Author:  currentCommit.Author,
@@ -261,6 +270,7 @@ func (c *Parser) fromReader(ctx context.Context, stdOut io.Reader, commitChan ch
 		case isModeLine(line):
 			// NoOp
 		case isIndexLine(line):
+			recentlyPassedAuthor = false
 			// NoOp
 		case isPlusFileLine(line):
 			currentDiff.PathB = strings.TrimRight(strings.TrimRight(string(line[6:]), "\n"), "\t") // Trim the newline and tab characters. https://github.com/trufflesecurity/trufflehog/issues/1060
@@ -270,7 +280,7 @@ func (c *Parser) fromReader(ctx context.Context, stdOut io.Reader, commitChan ch
 			currentDiff.Content.Write(line[1:])
 		case isMinusDiffLine(line):
 			// NoOp. We only care about additions.
-		case isMessageLine(line):
+		case (isMessageLine(line) && recentlyPassedAuthor):
 			currentCommit.Message.Write(line[4:])
 		case isContextDiffLine(line):
 			currentDiff.Content.Write([]byte("\n"))
@@ -303,15 +313,20 @@ func (c *Parser) fromReader(ctx context.Context, stdOut io.Reader, commitChan ch
 			break
 		}
 	}
-	cleanupParse(currentCommit, currentDiff, commitChan)
+	cleanupParse(currentCommit, currentDiff, commitChan, &totalLogSize)
+
+	ctx.Logger().V(2).Info("finished parsing git log.", "total_log_size", totalLogSize)
 }
 
-func cleanupParse(currentCommit *Commit, currentDiff *Diff, commitChan chan Commit) {
+func cleanupParse(currentCommit *Commit, currentDiff *Diff, commitChan chan Commit, totalLogSize *int) {
 	if currentDiff != nil && currentDiff.Content.Len() > 0 {
 		currentCommit.Diffs = append(currentCommit.Diffs, *currentDiff)
 	}
 	if currentCommit != nil {
 		commitChan <- *currentCommit
+		if totalLogSize != nil {
+			*totalLogSize += currentCommit.Size
+		}
 	}
 }
 
@@ -373,7 +388,7 @@ func isMinusFileLine(line []byte) bool {
 
 // +++ b/internal/addrs/move_endpoint_module.go
 func isPlusFileLine(line []byte) bool {
-	if len(line) >= 6 && bytes.Equal(line[:3], []byte("+++")) {
+	if len(line) >= 6 && bytes.Equal(line[:4], []byte("+++ ")) {
 		return true
 	}
 	return false

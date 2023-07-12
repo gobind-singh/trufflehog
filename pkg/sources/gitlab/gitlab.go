@@ -47,10 +47,12 @@ type Source struct {
 	resumeInfoMutex sync.Mutex
 	sources.Progress
 	jobPool *errgroup.Group
+	sources.CommonSourceUnitUnmarshaller
 }
 
-// Ensure the Source satisfies the interface at compile time.
+// Ensure the Source satisfies the interfaces at compile time.
 var _ sources.Source = (*Source)(nil)
+var _ sources.SourceUnitUnmarshaller = (*Source)(nil)
 
 // Type returns the type of source.
 // It is used for matching source types in configuration and job input.
@@ -111,6 +113,11 @@ func (s *Source) Init(_ context.Context, name string, jobId, sourceId int64, ver
 		s.url = "https://gitlab.com/"
 	}
 
+	err = git.GitCmdCheck()
+	if err != nil {
+		return err
+	}
+
 	s.git = git.NewGit(s.Type(), s.JobID(), s.SourceID(), s.name, s.verify, runtime.NumCPU(),
 		func(file, email, commit, timestamp, repository string, line int64) *source_metadatapb.MetaData {
 			return &source_metadatapb.MetaData{
@@ -120,7 +127,7 @@ func (s *Source) Init(_ context.Context, name string, jobId, sourceId int64, ver
 						File:       sanitizer.UTF8(file),
 						Email:      sanitizer.UTF8(email),
 						Repository: sanitizer.UTF8(repository),
-						Link:       git.GenerateLink(repository, commit, file),
+						Link:       git.GenerateLink(repository, commit, file, line),
 						Timestamp:  sanitizer.UTF8(timestamp),
 						Line:       line,
 					},

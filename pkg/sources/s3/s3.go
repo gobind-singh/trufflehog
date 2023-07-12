@@ -29,6 +29,11 @@ import (
 	"github.com/trufflesecurity/trufflehog/v3/pkg/sources"
 )
 
+const (
+	defaultMaxObjectSize = 250 * 1024 * 1024 // 250 MiB
+	maxObjectSizeLimit   = 250 * 1024 * 1024 // 250 MiB
+)
+
 type Source struct {
 	name        string
 	sourceId    int64
@@ -37,13 +42,16 @@ type Source struct {
 	concurrency int
 	log         logr.Logger
 	sources.Progress
-	errorCount *sync.Map
-	conn       *sourcespb.S3
-	jobPool    *errgroup.Group
+	errorCount    *sync.Map
+	conn          *sourcespb.S3
+	jobPool       *errgroup.Group
+	maxObjectSize int64
+	sources.CommonSourceUnitUnmarshaller
 }
 
-// Ensure the Source satisfies the interface at compile time
+// Ensure the Source satisfies the interfaces at compile time
 var _ sources.Source = (*Source)(nil)
+var _ sources.SourceUnitUnmarshaller = (*Source)(nil)
 
 // Type returns the type of source
 func (s *Source) Type() sourcespb.SourceType {
@@ -79,7 +87,20 @@ func (s *Source) Init(aCtx context.Context, name string, jobId, sourceId int64, 
 	}
 	s.conn = &conn
 
+	s.setMaxObjectSize(conn.GetMaxObjectSize())
+
 	return nil
+}
+
+// setMaxObjectSize sets the maximum size of objects that will be scanned. If
+// not set, set to a negative number, or set larger than the
+// maxObjectSizeLimit, the defaultMaxObjectSizeLimit will be used.
+func (s *Source) setMaxObjectSize(maxObjectSize int64) {
+	if maxObjectSize <= 0 || maxObjectSize > maxObjectSizeLimit {
+		s.maxObjectSize = defaultMaxObjectSize
+	} else {
+		s.maxObjectSize = maxObjectSize
+	}
 }
 
 func (s *Source) newClient(region string) (*s3.S3, error) {
@@ -88,6 +109,8 @@ func (s *Source) newClient(region string) (*s3.S3, error) {
 	cfg.Region = aws.String(region)
 
 	switch cred := s.conn.GetCredential().(type) {
+	case *sourcespb.S3_SessionToken:
+		cfg.Credentials = credentials.NewStaticCredentials(cred.SessionToken.Key, cred.SessionToken.Secret, cred.SessionToken.SessionToken)
 	case *sourcespb.S3_AccessKey:
 		cfg.Credentials = credentials.NewStaticCredentials(cred.AccessKey.Key, cred.AccessKey.Secret, "")
 	case *sourcespb.S3_Unauthenticated:
@@ -121,7 +144,7 @@ func (s *Source) Chunks(ctx context.Context, chunksChan chan *sources.Chunk) err
 	var bucketsToScan []string
 
 	switch s.conn.GetCredential().(type) {
-	case *sourcespb.S3_AccessKey, *sourcespb.S3_CloudEnvironment:
+	case *sourcespb.S3_AccessKey, *sourcespb.S3_SessionToken, *sourcespb.S3_CloudEnvironment:
 		if len(s.conn.Buckets) == 0 {
 			res, err := client.ListBuckets(&s3.ListBucketsInput{})
 			if err != nil {
@@ -174,7 +197,10 @@ func (s *Source) Chunks(ctx context.Context, chunksChan chan *sources.Chunk) err
 			})
 
 		if err != nil {
-			s.log.Error(err, "could not list objects in s3 bucket", "bucket", bucket)
+			return fmt.Errorf(
+				"could not list objects in s3 bucket: bucket %s: %w",
+				bucket,
+				err)
 		}
 	}
 	s.SetProgressComplete(len(bucketsToScan), len(bucketsToScan), fmt.Sprintf("Completed scanning source %s. %d objects scanned.", s.name, objectCount), "")
@@ -201,8 +227,8 @@ func (s *Source) pageChunker(ctx context.Context, client *s3.S3, chunksChan chan
 		}
 
 		// ignore large files
-		if *obj.Size > int64(250*common.MB) {
-			s.log.V(3).Info("Skipping %d byte file (over 250MB limit)", "object", *obj.Key)
+		if *obj.Size > s.maxObjectSize {
+			s.log.V(3).Info("Skipping %d byte file (over maxObjectSize limit)", "object", *obj.Key)
 			return
 		}
 

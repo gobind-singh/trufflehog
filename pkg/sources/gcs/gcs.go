@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 
 	"cloud.google.com/go/storage"
@@ -17,6 +18,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 
+	"github.com/trufflesecurity/trufflehog/v3/pkg/cache"
+	"github.com/trufflesecurity/trufflehog/v3/pkg/cache/memory"
 	"github.com/trufflesecurity/trufflehog/v3/pkg/context"
 	"github.com/trufflesecurity/trufflehog/v3/pkg/handlers"
 	"github.com/trufflesecurity/trufflehog/v3/pkg/pb/credentialspb"
@@ -25,8 +28,11 @@ import (
 	"github.com/trufflesecurity/trufflehog/v3/pkg/sources"
 )
 
-// Ensure the Source satisfies the interface at compile time.
+const defaultCachePersistIncrement = 2500
+
+// Ensure the Source satisfies the interfaces at compile time.
 var _ sources.Source = (*Source)(nil)
+var _ sources.SourceUnitUnmarshaller = (*Source)(nil)
 
 // Type returns the type of source.
 // It is used for matching source types in configuration and job input.
@@ -44,6 +50,11 @@ func (s *Source) JobID() int64 {
 	return s.jobId
 }
 
+type objectManager interface {
+	ListObjects(context.Context) (chan io.Reader, error)
+	Attributes(ctx context.Context) (*attributes, error)
+}
+
 // Source represents a GCS source.
 type Source struct {
 	name        string
@@ -57,7 +68,42 @@ type Source struct {
 	log        logr.Logger
 	chunksCh   chan *sources.Chunk
 
-	sources.Progress
+	mu               sync.Mutex
+	sources.Progress // progress is not thread safe
+	sources.CommonSourceUnitUnmarshaller
+}
+
+// persistableCache is a wrapper around cache.Cache that allows
+// for the persistence of the cache contents in the Progress of the source
+// at given increments.
+type persistableCache struct {
+	persistIncrement int
+	cache.Cache
+	*sources.Progress
+}
+
+func newPersistableCache(increment int, cache cache.Cache, p *sources.Progress) *persistableCache {
+	return &persistableCache{
+		persistIncrement: increment,
+		Cache:            cache,
+		Progress:         p,
+	}
+}
+
+// Set overrides the cache Set method of the cache to enable the persistence
+// of the cache contents the Progress of the source at given increments.
+func (c *persistableCache) Set(key, val string) {
+	c.Cache.Set(key, val)
+	if ok, contents := c.shouldPersist(); ok {
+		c.Progress.EncodedResumeInfo = contents
+	}
+}
+
+func (c *persistableCache) shouldPersist() (bool, string) {
+	if c.Count()%c.persistIncrement != 0 {
+		return false, ""
+	}
+	return true, c.Contents()
 }
 
 // Init returns an initialized GCS source.
@@ -190,8 +236,9 @@ func setGCSManagerOptions(include, exclude []string, includeFn, excludeFn func([
 }
 
 // enumerate all the objects and buckets in the source.
+// This will be used to calculate progress.
 func (s *Source) enumerate(ctx context.Context) error {
-	stats, err := s.gcsManager.attributes(ctx)
+	stats, err := s.gcsManager.Attributes(ctx)
 	if err != nil {
 		return fmt.Errorf("error getting attributes during enumeration: %w", err)
 	}
@@ -202,11 +249,14 @@ func (s *Source) enumerate(ctx context.Context) error {
 
 // Chunks emits chunks of bytes over a channel.
 func (s *Source) Chunks(ctx context.Context, chunksChan chan *sources.Chunk) error {
-	objectCh, err := s.gcsManager.listObjects(ctx)
+	persistableCache := s.setupCache(ctx)
+
+	objectCh, err := s.gcsManager.ListObjects(ctx)
 	if err != nil {
 		return fmt.Errorf("error listing objects: %w", err)
 	}
 	s.chunksCh = chunksChan
+	s.Progress.Message = "starting to process objects..."
 
 	var wg sync.WaitGroup
 	for obj := range objectCh {
@@ -214,6 +264,11 @@ func (s *Source) Chunks(ctx context.Context, chunksChan chan *sources.Chunk) err
 		o, ok := obj.(object)
 		if !ok {
 			ctx.Logger().Error(fmt.Errorf("unexpected object type: %T", obj), "GCS source unexpected object type", "name", s.name)
+			continue
+		}
+
+		if persistableCache.Exists(o.md5) {
+			ctx.Logger().V(5).Info("skipping object, object already processed", "name", o.name)
 			continue
 		}
 
@@ -225,11 +280,44 @@ func (s *Source) Chunks(ctx context.Context, chunksChan chan *sources.Chunk) err
 				ctx.Logger().V(1).Info("error setting start progress progress", "name", o.name, "error", err)
 				return
 			}
+			s.setProgress(ctx, o.md5, o.name, persistableCache)
 		}(o)
 	}
 	wg.Wait()
 
+	s.completeProgress(ctx)
 	return nil
+}
+
+func (s *Source) setupCache(ctx context.Context) *persistableCache {
+	var c cache.Cache
+	if s.Progress.EncodedResumeInfo != "" {
+		c = memory.NewWithData(ctx, strings.Split(s.Progress.EncodedResumeInfo, ","))
+	} else {
+		c = memory.New()
+	}
+
+	// TODO (ahrav): Make this configurable via conn.
+	persistCache := newPersistableCache(defaultCachePersistIncrement, c, &s.Progress)
+	return persistCache
+}
+
+func (s *Source) setProgress(ctx context.Context, md5, objName string, cache cache.Cache) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ctx.Logger().V(5).Info("setting progress for object", "object-name", objName)
+	s.SectionsCompleted++
+
+	cache.Set(md5, md5)
+	s.Progress.SectionsRemaining = int32(s.stats.numObjects)
+	s.Progress.PercentComplete = int64(float64(s.SectionsCompleted) / float64(s.stats.numObjects) * 100)
+}
+
+func (s *Source) completeProgress(ctx context.Context) {
+	msg := fmt.Sprintf("GCS source finished processing %d objects", s.stats.numObjects)
+	ctx.Logger().Info(msg)
+	s.Progress.Message = msg
 }
 
 func (s *Source) processObject(ctx context.Context, o object) error {

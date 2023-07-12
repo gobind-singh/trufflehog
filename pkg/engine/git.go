@@ -22,7 +22,12 @@ func (e *Engine) ScanGit(ctx context.Context, c sources.GitConfig) error {
 		git.ScanOptionLogOptions(logOptions),
 	}
 
-	repo, err := gogit.PlainOpenWithOptions(c.RepoPath, &gogit.PlainOpenOptions{DetectDotGit: true})
+	options := &gogit.PlainOpenOptions{
+		DetectDotGit:          true,
+		EnableDotGitCommonDir: true,
+	}
+
+	repo, err := gogit.PlainOpenWithOptions(c.RepoPath, options)
 	if err != nil {
 		return fmt.Errorf("could not open repo: %s: %w", c.RepoPath, err)
 	}
@@ -61,14 +66,13 @@ func (e *Engine) ScanGit(ctx context.Context, c sources.GitConfig) error {
 		"source_type", sourcespb.SourceType_SOURCE_TYPE_GIT.String(),
 		"source_name", "git",
 	)
-	e.sourcesWg.Add(1)
-	go func() {
+	e.sourcesWg.Go(func() error {
 		defer common.RecoverWithExit(ctx)
-		defer e.sourcesWg.Done()
 		err := gitSource.ScanRepo(ctx, repo, c.RepoPath, scanOptions, e.ChunksChan())
 		if err != nil {
-			ctx.Logger().Error(err, "could not scan repo")
+			return fmt.Errorf("could not scan repo: %w", err)
 		}
-	}()
+		return nil
+	})
 	return nil
 }

@@ -41,6 +41,7 @@ func (s Scanner) FromData(ctx context.Context, verify bool, data []byte) (result
 			s := detectors.Result{
 				DetectorType: detectorspb.DetectorType_Okta,
 				Raw:          []byte(token),
+				RawV2:        []byte(fmt.Sprintf("%s:%s", domain, token)),
 			}
 
 			if verify {
@@ -62,7 +63,7 @@ func (s Scanner) FromData(ctx context.Context, verify bool, data []byte) (result
 
 				resp, err := common.SaneHttpClient().Do(req)
 				if err != nil {
-					return results, err
+					continue
 				}
 				defer resp.Body.Close()
 				if resp.StatusCode >= 200 && resp.StatusCode < 300 {

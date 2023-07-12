@@ -16,7 +16,7 @@ enum SourceType {
   SOURCE_TYPE_BITBUCKET = 1;
   SOURCE_TYPE_CIRCLECI = 2;
   SOURCE_TYPE_CONFLUENCE = 3;
-  SOURCE_TYPE_DOCKERHUB_IMAGES = 4;
+  SOURCE_TYPE_DOCKER = 4;
   SOURCE_TYPE_ECR = 5;
   SOURCE_TYPE_GCS = 6;
   SOURCE_TYPE_GITHUB = 7;
@@ -41,6 +41,7 @@ enum SourceType {
   SOURCE_TYPE_PUBLIC_EVENT_MONITORING = 26;
   SOURCE_TYPE_SLACK_REALTIME = 27;
   SOURCE_TYPE_GOOGLE_DRIVE = 28;
+  SOURCE_TYPE_SHAREPOINT = 29;
   SOURCE_TYPE_GCS_UNAUTHED = 30;
 }
 
@@ -103,11 +104,14 @@ message Confluence {
   bool skip_history = 10;
 }
 
-message DockerHub {
+message Docker {
   oneof credential {
     credentials.Unauthenticated unauthenticated = 1;
+    credentials.BasicAuth basic_auth = 2;
+    string bearer_token = 3;
+    bool docker_keychain = 4;
   }
-  repeated string repositories = 2;
+  repeated string images = 5;
 }
 
 message ECR {
@@ -168,6 +172,7 @@ message GitHub {
     credentials.GitHubApp github_app = 2;
     string token = 3;
     credentials.Unauthenticated unauthenticated = 4;
+    credentials.BasicAuth basic_auth = 13;
   }
   repeated string repositories = 5;
   repeated string organizations = 6;
@@ -177,6 +182,8 @@ message GitHub {
   string base = 10;
   repeated string ignoreRepos = 11;
   repeated string includeRepos = 12;
+  bool includePullRequestComments = 14;
+  bool includeIssueComments = 15;
 }
 
 message GoogleDrive {
@@ -194,6 +201,7 @@ message JIRA {
     string token = 6;
   }
   repeated string projects = 5;
+  repeated string ignore_projects = 7;
 }
 
 message NPMUnauthenticatedPackage {
@@ -213,8 +221,10 @@ message S3 {
     credentials.KeySecret access_key = 1;
     credentials.Unauthenticated unauthenticated = 2;
     credentials.CloudEnvironment cloud_environment = 4;
+    credentials.AWSSessionTokenSecret session_token = 5;
   }
   repeated string buckets = 3;
+  int64 max_object_size = 6;
 }
 
 message Slack {
@@ -261,7 +271,7 @@ message Teams {
   }
   repeated string channels = 4;
   repeated string ignoreList = 5;
-  string team_id = 6;
+  repeated string team_ids = 6;
 }
 
 // https://www.jfrog.com/confluence/display/JFROG/Artifactory+REST+API#ArtifactoryRESTAPI-RetrieveFolderorRepositoryArchive
@@ -295,4 +305,11 @@ message SlackRealtime {
   oneof credential {
     credentials.SlackTokens tokens = 1;
   }
+}
+
+message Sharepoint {
+  oneof credential {
+    credentials.Oauth2 oauth = 1;
+  }
+  string site_url = 2;
 }

@@ -24,29 +24,31 @@ var (
 // Keywords are used for efficiently pre-filtering chunks.
 // Use identifiers in the secret preferably, or the provider name.
 func (s Scanner) Keywords() []string {
-	return []string{"sqlserver"}
+	return []string{"sql", "database", "Data Source", "Server=", "Network address="}
 }
 
 // FromData will find and optionally verify SpotifyKey secrets in a given set of bytes.
 func (s Scanner) FromData(ctx context.Context, verify bool, data []byte) (results []detectors.Result, err error) {
 	matches := pattern.FindAllStringSubmatch(string(data), -1)
 	for _, match := range matches {
-		params, _, err := msdsn.Parse(match[1])
+		paramsUnsafe, _, err := msdsn.Parse(match[1])
 		if err != nil {
 			continue
 		}
 
-		if params.Password == "" {
+		if paramsUnsafe.Password == "" {
 			continue
 		}
 
 		detected := detectors.Result{
 			DetectorType: detectorspb.DetectorType_SQLServer,
-			Raw:          []byte(params.Password),
+			Raw:          []byte(paramsUnsafe.Password),
+			RawV2:        []byte(paramsUnsafe.URL().String()),
+			Redacted:     detectors.RedactURL(*paramsUnsafe.URL()),
 		}
 
 		if verify {
-			verified, err := ping(params)
+			verified, err := ping(paramsUnsafe)
 			if err != nil {
 			} else {
 				detected.Verified = verified

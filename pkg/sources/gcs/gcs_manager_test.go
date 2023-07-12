@@ -420,13 +420,13 @@ func TestGCSManagerStats(t *testing.T) {
 				t.Fatalf("newGCSManager() error = %v", err)
 			}
 
-			got, err := gm.attributes(ctx)
+			got, err := gm.Attributes(ctx)
 			if err != nil {
-				t.Errorf("attributes() error = %v", err)
+				t.Errorf("Attributes() error = %v", err)
 			}
 
 			if diff := cmp.Diff(got, tc.wantStats, cmp.AllowUnexported(attributes{}), cmpopts.IgnoreFields(attributes{}, "mu")); diff != "" {
-				t.Errorf("attributes() got: %v, want: %v, diff: %v", got, tc.wantStats, diff)
+				t.Errorf("Attributes() got: %v, want: %v, diff: %v", got, tc.wantStats, diff)
 			}
 		})
 	}
@@ -443,7 +443,7 @@ func TestGCSManagerStats_Time(t *testing.T) {
 
 	start := time.Now()
 	var stats *attributes
-	stats, _ = gm.attributes(ctx)
+	stats, _ = gm.Attributes(ctx)
 	end := time.Since(start).Seconds()
 
 	fmt.Printf("Time taken to get %d objects: %f seconds\n", stats.numObjects, end)
@@ -480,6 +480,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 					size:        150,
 					link:        "https://storage.googleapis.com/download/storage/v1/b/test-bkt-th/o/aws1.txt?generation=1677870994890594&alt=media",
 					acl:         []string{},
+					md5:         "7a4df45f839cd594ac236b19524cec92",
 				},
 				{
 					name:        "moar2.txt",
@@ -488,6 +489,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 					size:        12,
 					link:        "https://storage.googleapis.com/download/storage/v1/b/test-bkt-th/o/moar2.txt?generation=1677871000378542&alt=media",
 					acl:         []string{},
+					md5:         "e59ff97941044f85df5297e1c302d260",
 				},
 				{
 					name:        "aws3.txt",
@@ -496,6 +498,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 					size:        150,
 					link:        "https://storage.googleapis.com/download/storage/v1/b/test-bkt-th2/o/aws3.txt?generation=1677871022489611&alt=media",
 					acl:         []string{},
+					md5:         "26eb03378a0c8e99ee0cecf9155ace81",
 				},
 				{
 					name:        "moar.txt",
@@ -504,6 +507,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 					size:        6,
 					link:        "https://storage.googleapis.com/download/storage/v1/b/test-bkt-th3/o/moar.txt?generation=1677871042896804&alt=media",
 					acl:         []string{},
+					md5:         "09f7e02f1290be211da707a266f153b3",
 				},
 				{
 					name:        "AMAZON_FASHION_5.json",
@@ -512,6 +516,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 					size:        1413469,
 					link:        "https://storage.googleapis.com/download/storage/v1/b/test-bkt-th4/o/AMAZON_FASHION_5.json?generation=1677871063457469&alt=media",
 					acl:         []string{},
+					md5:         "5a1d8f483aa34695256379050d42a2b7",
 				},
 			},
 			wantNumBkt: 4,
@@ -529,6 +534,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 					size:        150,
 					link:        "https://storage.googleapis.com/download/storage/v1/b/test-bkt-th/o/aws1.txt?generation=1677870994890594&alt=media",
 					acl:         []string{},
+					md5:         "7a4df45f839cd594ac236b19524cec92",
 				},
 				{
 					name:        "moar2.txt",
@@ -537,6 +543,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 					size:        12,
 					link:        "https://storage.googleapis.com/download/storage/v1/b/test-bkt-th/o/moar2.txt?generation=1677871000378542&alt=media",
 					acl:         []string{},
+					md5:         "e59ff97941044f85df5297e1c302d260",
 				},
 			},
 			wantNumBkt: 1,
@@ -554,6 +561,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 					size:        6,
 					link:        "https://storage.googleapis.com/download/storage/v1/b/test-bkt-th3/o/moar.txt?generation=1677871042896804&alt=media",
 					acl:         []string{},
+					md5:         "09f7e02f1290be211da707a266f153b3",
 				},
 				{
 					name:        "AMAZON_FASHION_5.json",
@@ -562,6 +570,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 					size:        1413469,
 					link:        "https://storage.googleapis.com/download/storage/v1/b/test-bkt-th4/o/AMAZON_FASHION_5.json?generation=1677871063457469&alt=media",
 					acl:         []string{},
+					md5:         "5a1d8f483aa34695256379050d42a2b7",
 				},
 			},
 			wantNumBkt: 2,
@@ -583,6 +592,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 					size:        150,
 					link:        "https://storage.googleapis.com/download/storage/v1/b/test-bkt-th2/o/aws3.txt?generation=1677871022489611&alt=media",
 					acl:         []string{},
+					md5:         "26eb03378a0c8e99ee0cecf9155ace81",
 				},
 				{
 					name:        "moar.txt",
@@ -591,6 +601,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 					size:        6,
 					link:        "https://storage.googleapis.com/download/storage/v1/b/test-bkt-th3/o/moar.txt?generation=1677871042896804&alt=media",
 					acl:         []string{},
+					md5:         "09f7e02f1290be211da707a266f153b3",
 				},
 				{
 					name:        "AMAZON_FASHION_5.json",
@@ -599,6 +610,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 					size:        1413469,
 					link:        "https://storage.googleapis.com/download/storage/v1/b/test-bkt-th4/o/AMAZON_FASHION_5.json?generation=1677871063457469&alt=media",
 					acl:         []string{},
+					md5:         "5a1d8f483aa34695256379050d42a2b7",
 				},
 			},
 			wantNumBkt: 4, // We still list objects in all buckets.
@@ -620,6 +632,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 					size:        150,
 					link:        "https://storage.googleapis.com/download/storage/v1/b/test-bkt-th/o/aws1.txt?generation=1677870994890594&alt=media",
 					acl:         []string{},
+					md5:         "7a4df45f839cd594ac236b19524cec92",
 				},
 			},
 			wantNumBkt: 1,
@@ -641,6 +654,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 					size:        150,
 					link:        "https://storage.googleapis.com/download/storage/v1/b/test-bkt-th/o/aws1.txt?generation=1677870994890594&alt=media",
 					acl:         []string{},
+					md5:         "7a4df45f839cd594ac236b19524cec92",
 				},
 			},
 			wantNumBkt: 4,
@@ -663,6 +677,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 					size:        12,
 					link:        "https://storage.googleapis.com/download/storage/v1/b/test-bkt-th/o/moar2.txt?generation=1677871000378542&alt=media",
 					acl:         []string{},
+					md5:         "e59ff97941044f85df5297e1c302d260",
 				},
 			},
 			wantNumBkt: 1,
@@ -675,7 +690,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 			mgr, err := newGCSManager(tc.projectID, tc.opts...)
 			assert.Nil(t, err)
 
-			got, err := mgr.listObjects(ctx)
+			got, err := mgr.ListObjects(ctx)
 			if (err != nil) != tc.wantErr {
 				t.Errorf("GCSManager.ListObjects() error = %v, wantErr %v", err, tc.wantErr)
 				return
@@ -699,7 +714,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 				}
 
 				if len(res) != len(tc.want) {
-					t.Errorf("gcsManager.listObjects() got: %v, want: %v", res, tc.want)
+					t.Errorf("gcsManager.ListObjects() got: %v, want: %v", res, tc.want)
 				}
 
 				// Test the bucket and object counts.
@@ -713,7 +728,7 @@ func TestGCSManagerListObjects(t *testing.T) {
 
 				// Test the objects are equal.
 				if diff := cmp.Diff(res, tc.want, cmp.AllowUnexported(object{}), cmpopts.IgnoreFields(object{}, "Reader", "createdAt", "updatedAt")); diff != "" {
-					t.Errorf("gcsManager.listObjects() mismatch (-want +got):\n%s", diff)
+					t.Errorf("gcsManager.ListObjects() mismatch (-want +got):\n%s", diff)
 				}
 			}()
 
@@ -750,6 +765,7 @@ func TestGCSManagerListObjects_Resuming(t *testing.T) {
 					size:        12,
 					link:        "https://storage.googleapis.com/download/storage/v1/b/test-bkt-th/o/moar2.txt?generation=1677871000378542&alt=media",
 					acl:         []string{},
+					md5:         "e59ff97941044f85df5297e1c302d260",
 				},
 			},
 			wantNumBkt: 1,
@@ -762,7 +778,7 @@ func TestGCSManagerListObjects_Resuming(t *testing.T) {
 			mgr, err := newGCSManager(tc.projectID, tc.opts...)
 			assert.Nil(t, err)
 
-			got, err := mgr.listObjects(ctx)
+			got, err := mgr.ListObjects(ctx)
 			if (err != nil) != tc.wantErr {
 				t.Errorf("GCSManager.ListObjects() error = %v, wantErr %v", err, tc.wantErr)
 				return
@@ -786,7 +802,7 @@ func TestGCSManagerListObjects_Resuming(t *testing.T) {
 				}
 
 				if len(res) != len(tc.want) {
-					t.Errorf("gcsManager.listObjects() got: %v, want: %v", res, tc.want)
+					t.Errorf("gcsManager.ListObjects() got: %v, want: %v", res, tc.want)
 				}
 
 				// Test the bucket and object counts.
@@ -800,7 +816,7 @@ func TestGCSManagerListObjects_Resuming(t *testing.T) {
 
 				// Test the objects are equal.
 				if diff := cmp.Diff(res, tc.want, cmp.AllowUnexported(object{}), cmpopts.IgnoreFields(object{}, "Reader", "createdAt", "updatedAt")); diff != "" {
-					t.Errorf("gcsManager.listObjects() mismatch (-want +got):\n%s", diff)
+					t.Errorf("gcsManager.ListObjects() mismatch (-want +got):\n%s", diff)
 				}
 			}()
 

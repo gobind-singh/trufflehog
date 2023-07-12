@@ -44,6 +44,39 @@ type Source interface {
 	GetProgress() *Progress
 }
 
+// SourceUnitUnmarshaller defines an optional interface a Source can implement
+// to support units coming from an external source.
+type SourceUnitUnmarshaller interface {
+	UnmarshalSourceUnit(data []byte) (SourceUnit, error)
+}
+
+// SourceUnitEnumerator defines an optional interface a Source can implement to
+// support enumerating an initialized Source into SourceUnits.
+type SourceUnitEnumerator interface {
+	// Enumerate enumerates the initialized Source, outputting units. This
+	// method is synchronous but can be called in a goroutine to support
+	// concurrent enumeration and chunking. An error should only be
+	// returned from this method in the case of context cancellation. All
+	// other errors related to unit enumeration are tracked in the
+	// EnumerationResult.
+	Enumerate(ctx context.Context, units chan<- EnumerationResult) error
+}
+
+// EnumerationResult is the result of an enumeration, containing the unit and
+// error if any. Unit and Error are mutually exclusive (only one will be
+// non-nil).
+type EnumerationResult struct {
+	Unit  SourceUnit
+	Error error
+}
+
+// SourceUnit is an object that represents a Source's unit of work. This is
+// used as the output of enumeration, progress reporting, and job distribution.
+type SourceUnit interface {
+	// SourceUnitID uniquely identifies a source unit.
+	SourceUnitID() string
+}
+
 // GCSConfig defines the optional configuration for a GCS source.
 type GCSConfig struct {
 	// CloudCred determines whether to use cloud credentials.
@@ -140,9 +173,13 @@ type S3Config struct {
 	// Key is any key to use to authenticate with the source.
 	Key,
 	// Secret is any secret to use to authenticate with the source.
-	Secret string
+	Secret,
+	// Temporary session token associated with a temporary access key id and secret key.
+	SessionToken string
 	// Buckets is the list of buckets to scan.
 	Buckets []string
+	// MaxObjectSize is the maximum object size to scan.
+	MaxObjectSize int64
 }
 
 // SyslogConfig defines the optional configuration for a syslog source.
@@ -169,6 +206,12 @@ type Progress struct {
 	EncodedResumeInfo string
 	SectionsCompleted int32
 	SectionsRemaining int32
+}
+
+// Validator is an interface for validating a source. Sources can optionally implement this interface to validate
+// their configuration.
+type Validator interface {
+	Validate() []error
 }
 
 // SetProgressComplete sets job progress information for a running job based on the highest level objects in the source.
@@ -199,4 +242,17 @@ func (p *Progress) GetProgress() *Progress {
 	p.mut.Lock()
 	defer p.mut.Unlock()
 	return p
+}
+
+// CommonEnumerationOk is a helper function to construct an EnumerationResult
+// using a CommonSourceUnit.
+func CommonEnumerationOk(id string) EnumerationResult {
+	unit := CommonSourceUnit{ID: id}
+	return EnumerationResult{Unit: unit}
+}
+
+// EnumerationErr is a helper function to construct an EnumerationResult from
+// an error.
+func EnumerationErr(err error) EnumerationResult {
+	return EnumerationResult{Error: err}
 }

@@ -1,7 +1,8 @@
-package image4
+package opsgenie
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -20,16 +21,20 @@ var (
 	client = common.SaneHttpClient()
 
 	// Make sure that your group is surrounded in boundary characters such as below to reduce false positives.
-	keyPat = regexp.MustCompile(detectors.PrefixRegex([]string{"image4"}) + `\b([0-9a-zA-Z]{22}[0-9a-zA-Z\=]{2})`)
+	keyPat = regexp.MustCompile(detectors.PrefixRegex([]string{"opsgenie"}) + `\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b`)
 )
+
+func (s Scanner) Type() detectorspb.DetectorType {
+	return detectorspb.DetectorType_Opsgenie
+}
 
 // Keywords are used for efficiently pre-filtering chunks.
 // Use identifiers in the secret preferably, or the provider name.
 func (s Scanner) Keywords() []string {
-	return []string{"image4"}
+	return []string{"opsgenie"}
 }
 
-// FromData will find and optionally verify Image4 secrets in a given set of bytes.
+// FromData will find and optionally verify Opsgenie secrets in a given set of bytes.
 func (s Scanner) FromData(ctx context.Context, verify bool, data []byte) (results []detectors.Result, err error) {
 	dataStr := string(data)
 
@@ -42,16 +47,16 @@ func (s Scanner) FromData(ctx context.Context, verify bool, data []byte) (result
 		resMatch := strings.TrimSpace(match[1])
 
 		s1 := detectors.Result{
-			DetectorType: detectorspb.DetectorType_Image4,
+			DetectorType: detectorspb.DetectorType_Opsgenie,
 			Raw:          []byte(resMatch),
 		}
 
 		if verify {
-			req, err := http.NewRequestWithContext(ctx, "GET", "https://api.image4.io/v1.0/subscription", nil)
+			req, err := http.NewRequestWithContext(ctx, "GET", "https://api.opsgenie.com/v2/users", nil)
 			if err != nil {
 				continue
 			}
-			req.SetBasicAuth(resMatch, "")
+			req.Header.Add("Authorization", fmt.Sprintf("GenieKey %s", resMatch))
 			res, err := client.Do(req)
 			if err == nil {
 				defer res.Body.Close()
@@ -69,9 +74,5 @@ func (s Scanner) FromData(ctx context.Context, verify bool, data []byte) (result
 		results = append(results, s1)
 	}
 
-	return results, nil
-}
-
-func (s Scanner) Type() detectorspb.DetectorType {
-	return detectorspb.DetectorType_Image4
+	return detectors.CleanResults(results), nil
 }

@@ -38,11 +38,12 @@ func TestAWS_FromChunk(t *testing.T) {
 		verify bool
 	}
 	tests := []struct {
-		name    string
-		s       scanner
-		args    args
-		want    []detectors.Result
-		wantErr bool
+		name                  string
+		s                     scanner
+		args                  args
+		want                  []detectors.Result
+		wantErr               bool
+		wantVerificationError bool
 	}{
 		{
 			name: "found, verified",
@@ -56,11 +57,11 @@ func TestAWS_FromChunk(t *testing.T) {
 				{
 					DetectorType: detectorspb.DetectorType_AWS,
 					Verified:     true,
-					Redacted:     "AKIAWARWQKZNHMZBLY4I",
+					Redacted:     "AKIASP2TPHJSQH3FJRUX",
 					ExtraData: map[string]string{
-						"account": "413504919130",
-						"arn":     "arn:aws:iam::413504919130:root",
-						"user_id": "413504919130",
+						"account": "171436882533",
+						"arn":     "arn:aws:iam::171436882533:user/canarytokens.com@@4dxkh0pdeop3bzu9zx5wob793",
+						"user_id": "AIDASP2TPHJSUFRSTTZX4",
 					},
 				},
 			},
@@ -78,7 +79,7 @@ func TestAWS_FromChunk(t *testing.T) {
 				{
 					DetectorType: detectorspb.DetectorType_AWS,
 					Verified:     false,
-					Redacted:     "AKIAWARWQKZNHMZBLY4I",
+					Redacted:     "AKIASP2TPHJSQH3FJRUX",
 					ExtraData:    nil,
 				},
 			},
@@ -106,18 +107,18 @@ func TestAWS_FromChunk(t *testing.T) {
 			want: []detectors.Result{
 				{
 					DetectorType: detectorspb.DetectorType_AWS,
-					Verified:     true,
-					Redacted:     id,
-					ExtraData: map[string]string{
-						"account": "413504919130",
-						"arn":     "arn:aws:iam::413504919130:root",
-						"user_id": "413504919130",
-					},
+					Verified:     false,
+					Redacted:     "AKIASP2TPHJSQH3FJXYZ",
 				},
 				{
 					DetectorType: detectorspb.DetectorType_AWS,
-					Verified:     false,
-					Redacted:     inactiveID,
+					Verified:     true,
+					Redacted:     "AKIASP2TPHJSQH3FJRUX",
+					ExtraData: map[string]string{
+						"account": "171436882533",
+						"arn":     "arn:aws:iam::171436882533:user/canarytokens.com@@4dxkh0pdeop3bzu9zx5wob793",
+						"user_id": "AIDASP2TPHJSUFRSTTZX4",
+					},
 				},
 			},
 			wantErr: false,
@@ -145,11 +146,11 @@ func TestAWS_FromChunk(t *testing.T) {
 				{
 					DetectorType: detectorspb.DetectorType_AWS,
 					Verified:     true,
-					Redacted:     id,
+					Redacted:     "AKIASP2TPHJSQH3FJRUX",
 					ExtraData: map[string]string{
-						"account": "413504919130",
-						"arn":     "arn:aws:iam::413504919130:root",
-						"user_id": "413504919130",
+						"account": "171436882533",
+						"arn":     "arn:aws:iam::171436882533:user/canarytokens.com@@4dxkh0pdeop3bzu9zx5wob793",
+						"user_id": "AIDASP2TPHJSUFRSTTZX4",
 					},
 				},
 				{
@@ -172,7 +173,7 @@ func TestAWS_FromChunk(t *testing.T) {
 				{
 					DetectorType: detectorspb.DetectorType_AWS,
 					Verified:     false,
-					Redacted:     "AKIAWARWQKZNHMZBLY4I",
+					Redacted:     "AKIASP2TPHJSQH3FJRUX",
 				},
 			},
 			wantErr: false,
@@ -181,7 +182,7 @@ func TestAWS_FromChunk(t *testing.T) {
 			name: "skipped",
 			s: scanner{
 				skipIDs: map[string]struct{}{
-					"AKIAWARWQKZNHMZBLY4I": {},
+					"AKIASP2TPHJSQH3FJRUX": {},
 				},
 			},
 			args: args{
@@ -190,6 +191,24 @@ func TestAWS_FromChunk(t *testing.T) {
 				verify: true,
 			},
 			wantErr: false,
+		},
+		{
+			name: "found, would be verified if not for http timeout",
+			s:    scanner{},
+			args: args{
+				ctx:    timeoutContext(1 * time.Microsecond),
+				data:   []byte(fmt.Sprintf("You can find a aws secret %s within aws %s", secret, id)),
+				verify: true,
+			},
+			want: []detectors.Result{
+				{
+					DetectorType: detectorspb.DetectorType_AWS,
+					Verified:     false,
+					Redacted:     "AKIASP2TPHJSQH3FJRUX",
+				},
+			},
+			wantErr:               false,
+			wantVerificationError: true,
 		},
 	}
 	for _, tt := range tests {
@@ -204,8 +223,11 @@ func TestAWS_FromChunk(t *testing.T) {
 				if len(got[i].Raw) == 0 {
 					t.Fatalf("no raw secret present: \n %+v", got[i])
 				}
+				if (got[i].VerificationError != nil) != tt.wantVerificationError {
+					t.Fatalf("verification error = %v, wantVerificationError %v", got[i].VerificationError, tt.wantVerificationError)
+				}
 			}
-			ignoreOpts := cmpopts.IgnoreFields(detectors.Result{}, "RawV2", "Raw")
+			ignoreOpts := cmpopts.IgnoreFields(detectors.Result{}, "RawV2", "Raw", "VerificationError")
 			if diff := cmp.Diff(got, tt.want, ignoreOpts); diff != "" {
 				t.Errorf("AWS.FromData() %s diff: (-got +want)\n%s", tt.name, diff)
 			}
@@ -226,4 +248,9 @@ func BenchmarkFromData(benchmark *testing.B) {
 			}
 		})
 	}
+}
+
+func timeoutContext(timeout time.Duration) context.Context {
+	c, _ := context.WithTimeout(context.Background(), timeout)
+	return c
 }

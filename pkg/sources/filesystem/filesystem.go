@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"io/fs"
@@ -38,10 +39,13 @@ type Source struct {
 	log      logr.Logger
 	filter   *common.Filter
 	sources.Progress
+	sources.CommonSourceUnitUnmarshaller
 }
 
-// Ensure the Source satisfies the interface at compile time
+// Ensure the Source satisfies the interfaces at compile time
 var _ sources.Source = (*Source)(nil)
+var _ sources.SourceUnitUnmarshaller = (*Source)(nil)
+var _ sources.SourceUnitEnumerator = (*Source)(nil)
 
 // Type returns the type of source.
 // It is used for matching source types in configuration and job input.
@@ -181,23 +185,47 @@ func (s *Source) scanFile(ctx context.Context, path string, chunksChan chan *sou
 		return err
 	}
 	reReader.Stop()
-	data, err := io.ReadAll(reReader)
-	if err != nil {
-		return fmt.Errorf("unable to read file: %w", err)
-	}
-	chunksChan <- &sources.Chunk{
-		SourceType: s.Type(),
-		SourceName: s.name,
-		SourceID:   s.SourceID(),
-		Data:       data,
-		SourceMetadata: &source_metadatapb.MetaData{
-			Data: &source_metadatapb.MetaData_Filesystem{
-				Filesystem: &source_metadatapb.Filesystem{
-					File: sanitizer.UTF8(path),
+
+	for {
+		chunkBytes := make([]byte, BufferSize)
+		reader := bufio.NewReaderSize(reReader, BufferSize)
+		n, err := reader.Read(chunkBytes)
+		if err != nil && !errors.Is(err, io.EOF) {
+			break
+		}
+		peekData, _ := reader.Peek(PeekSize)
+		if n > 0 {
+			chunksChan <- &sources.Chunk{
+				SourceType: s.Type(),
+				SourceName: s.name,
+				SourceID:   s.SourceID(),
+				Data:       append(chunkBytes[:n], peekData...),
+				SourceMetadata: &source_metadatapb.MetaData{
+					Data: &source_metadatapb.MetaData_Filesystem{
+						Filesystem: &source_metadatapb.Filesystem{
+							File: sanitizer.UTF8(path),
+						},
+					},
 				},
-			},
-		},
-		Verify: s.verify,
+				Verify: s.verify,
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+	}
+	return nil
+}
+
+// Enumerate implements SourceUnitEnumerator interface. This implementation simply
+// passes the configured paths as the source unit, whether it be a single
+// filepath or a directory.
+func (s *Source) Enumerate(ctx context.Context, units chan<- sources.EnumerationResult) error {
+	for _, path := range s.paths {
+		item := sources.CommonEnumerationOk(path)
+		if err := common.CancellableWrite(ctx, units, item); err != nil {
+			return err
+		}
 	}
 	return nil
 }

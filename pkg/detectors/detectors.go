@@ -2,6 +2,7 @@ package detectors
 
 import (
 	"context"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -31,6 +32,13 @@ type Versioner interface {
 	Version() int
 }
 
+// EndpointCustomizer is an optional interface that a detector can implement to
+// support verifying against user-supplied endpoints.
+type EndpointCustomizer interface {
+	SetEndpoints(...string) error
+	DefaultEndpoint() string
+}
+
 type Result struct {
 	// DetectorType is the type of Detector.
 	DetectorType detectorspb.DetectorType
@@ -49,6 +57,10 @@ type Result struct {
 	Redacted       string
 	ExtraData      map[string]string
 	StructuredData *detectorspb.StructuredData
+
+	// This field should only be populated if the verification process itself failed in a way that provides no
+	// information about the verification status of the candidate secret, such as if the verification request timed out.
+	VerificationError error
 }
 
 type ResultWithMetadata struct {
@@ -61,6 +73,8 @@ type ResultWithMetadata struct {
 	// SourceName is the name of the Source.
 	SourceName string
 	Result
+	// Data from the sources.Chunk which this result was emitted for
+	Data []byte
 }
 
 // CopyMetadata returns a detector result with included metadata from the source chunk.
@@ -71,6 +85,7 @@ func CopyMetadata(chunk *sources.Chunk, result Result) ResultWithMetadata {
 		SourceType:     chunk.SourceType,
 		SourceName:     chunk.SourceName,
 		Result:         result,
+		Data:           chunk.Data,
 	}
 }
 
@@ -112,7 +127,7 @@ func PrefixRegex(keywords []string) string {
 }
 
 // KeyIsRandom is a Low cost check to make sure that 'keys' include a number to reduce FPs.
-// Golang doesnt support regex lookaheads, so must be done in separate calls.
+// Golang doesn't support regex lookaheads, so must be done in separate calls.
 // TODO improve checks. Shannon entropy did not work well.
 func KeyIsRandom(key string) bool {
 	for _, ch := range key {
@@ -142,4 +157,9 @@ func MustGetBenchmarkData() map[string][]byte {
 		"medium": medium,
 		"big":    big,
 	}
+}
+
+func RedactURL(u url.URL) string {
+	u.User = url.UserPassword(u.User.Username(), "********")
+	return strings.TrimSpace(strings.Replace(u.String(), "%2A", "*", -1))
 }

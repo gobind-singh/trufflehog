@@ -1,7 +1,7 @@
 //go:build detectors
 // +build detectors
 
-package image4
+package docusign
 
 import (
 	"context"
@@ -16,15 +16,16 @@ import (
 	"github.com/trufflesecurity/trufflehog/v3/pkg/pb/detectorspb"
 )
 
-func TestImage4_FromChunk(t *testing.T) {
+func TestDocusign_FromChunk(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
-	testSecrets, err := common.GetSecret(ctx, "trufflehog-testing", "detectors3")
+	testSecrets, err := common.GetSecret(ctx, "trufflehog-testing", "detectors5")
 	if err != nil {
 		t.Fatalf("could not get test secrets from GCP: %s", err)
 	}
-	secret := testSecrets.MustGetField("IMAGE4")
-	inactiveSecret := testSecrets.MustGetField("IMAGE4_INACTIVE")
+	integrationKey := testSecrets.MustGetField("DOCUSIGN_INTEGRATION_KEY_ACTIVE")
+	activeSecret := testSecrets.MustGetField("DOCUSIGN_SECRET_ACTIVE")
+	inactiveSecret := testSecrets.MustGetField("DOCUSIGN_SECRET_INACTIVE")
 
 	type args struct {
 		ctx    context.Context
@@ -43,13 +44,15 @@ func TestImage4_FromChunk(t *testing.T) {
 			s:    Scanner{},
 			args: args{
 				ctx:    context.Background(),
-				data:   []byte(fmt.Sprintf("You can find a image4 secret %s within", secret)),
+				data:   []byte(fmt.Sprintf("You can find a docusign id %s and secret %s within", integrationKey, activeSecret)),
 				verify: true,
 			},
 			want: []detectors.Result{
 				{
-					DetectorType: detectorspb.DetectorType_Image4,
+					DetectorType: detectorspb.DetectorType_Docusign,
 					Verified:     true,
+					RawV2:        []byte(integrationKey + activeSecret),
+					Redacted:     integrationKey,
 				},
 			},
 			wantErr: false,
@@ -59,13 +62,15 @@ func TestImage4_FromChunk(t *testing.T) {
 			s:    Scanner{},
 			args: args{
 				ctx:    context.Background(),
-				data:   []byte(fmt.Sprintf("You can find a image4 secret %s within but not valid", inactiveSecret)), // the secret would satisfy the regex but not pass validation
+				data:   []byte(fmt.Sprintf("You can find a docusign id %s and secret %s within", integrationKey, inactiveSecret)), // the secret would satisfy the regex but not pass validation
 				verify: true,
 			},
 			want: []detectors.Result{
 				{
-					DetectorType: detectorspb.DetectorType_Image4,
+					DetectorType: detectorspb.DetectorType_Docusign,
 					Verified:     false,
+					RawV2:        []byte(integrationKey + inactiveSecret),
+					Redacted:     integrationKey,
 				},
 			},
 			wantErr: false,
@@ -87,7 +92,7 @@ func TestImage4_FromChunk(t *testing.T) {
 			s := Scanner{}
 			got, err := s.FromData(tt.args.ctx, tt.args.verify, tt.args.data)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("Image4.FromData() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("Docusign.FromData() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 			for i := range got {
@@ -97,7 +102,7 @@ func TestImage4_FromChunk(t *testing.T) {
 				got[i].Raw = nil
 			}
 			if diff := pretty.Compare(got, tt.want); diff != "" {
-				t.Errorf("Image4.FromData() %s diff: (-got +want)\n%s", tt.name, diff)
+				t.Errorf("Docusign.FromData() %s diff: (-got +want)\n%s", tt.name, diff)
 			}
 		})
 	}

@@ -191,7 +191,13 @@ func (s scanner) FromData(ctx context.Context, verify bool, data []byte) (result
 						if detectors.IsKnownFalsePositive(resSecretMatch, detectors.DefaultFalsePositives, true) {
 							continue
 						}
+
+						if res.StatusCode != 403 {
+							s1.VerificationError = fmt.Errorf("request to %v returned unexpected status %d", res.Request.URL, res.StatusCode)
+						}
 					}
+				} else {
+					s1.VerificationError = err
 				}
 			}
 
@@ -215,7 +221,7 @@ func awsCustomCleanResults(results []detectors.Result) []detectors.Result {
 		return results
 	}
 
-	// For every ID, we want at most one result, preferrably verified.
+	// For every ID, we want at most one result, preferably verified.
 	idResults := map[string]detectors.Result{}
 	for _, result := range results {
 		// Always accept the verified result as the result for the given ID.

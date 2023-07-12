@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"fmt"
 	"reflect"
 	"runtime"
 	"strings"
@@ -10,9 +11,11 @@ import (
 	"time"
 
 	ahocorasick "github.com/petar-dambovaliev/aho-corasick"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/trufflesecurity/trufflehog/v3/pkg/common"
+	"github.com/trufflesecurity/trufflehog/v3/pkg/config"
 	"github.com/trufflesecurity/trufflehog/v3/pkg/context"
 	"github.com/trufflesecurity/trufflehog/v3/pkg/decoders"
 	"github.com/trufflesecurity/trufflehog/v3/pkg/detectors"
@@ -31,7 +34,7 @@ type Engine struct {
 	chunksScanned   uint64
 	bytesScanned    uint64
 	detectorAvgTime sync.Map
-	sourcesWg       sync.WaitGroup
+	sourcesWg       *errgroup.Group
 	workersWg       sync.WaitGroup
 	// filterUnverified is used to reduce the number of unverified results.
 	// If there are multiple unverified results for the same chunk for the same detector,
@@ -50,6 +53,8 @@ func WithConcurrency(concurrency int) EngineOption {
 		e.concurrency = concurrency
 	}
 }
+
+const ignoreTag = "trufflehog:ignore"
 
 func WithDetectors(verify bool, d ...detectors.Detector) EngineOption {
 	return func(e *Engine) {
@@ -122,6 +127,11 @@ func Start(ctx context.Context, options ...EngineOption) *Engine {
 	}
 	ctx.Logger().V(2).Info("engine started", "workers", e.concurrency)
 
+	sourcesWg, egCtx := errgroup.WithContext(ctx)
+	sourcesWg.SetLimit(e.concurrency)
+	e.sourcesWg = sourcesWg
+	ctx.SetParent(egCtx)
+
 	if len(e.decoders) == 0 {
 		e.decoders = decoders.DefaultDecoders()
 	}
@@ -149,12 +159,27 @@ func Start(ctx context.Context, options ...EngineOption) *Engine {
 	})
 	e.prefilter = builder.Build(keywords)
 
-	ctx.Logger().V(2).Info("loaded decoders", "count", len(e.decoders))
-	ctx.Logger().V(2).Info("loaded detectors",
+	ctx.Logger().Info("loaded decoders", "count", len(e.decoders))
+	ctx.Logger().Info("loaded detectors",
 		"total", len(e.detectors[true])+len(e.detectors[false]),
 		"verification_enabled", len(e.detectors[true]),
 		"verification_disabled", len(e.detectors[false]),
 	)
+
+	// Sanity check detectors for duplicate configuration. Only log in case
+	// a detector has been configured in a way that isn't represented by
+	// the DetectorID (type and version).
+	{
+		dets := append(e.detectors[true], e.detectors[false]...)
+		seenDetectors := make(map[config.DetectorID]struct{}, len(dets))
+		for _, det := range dets {
+			id := config.GetDetectorID(det)
+			if _, ok := seenDetectors[id]; ok && id.ID != detectorspb.DetectorType_CustomRegex {
+				ctx.Logger().Info("possible duplicate detector configured", "detector", id)
+			}
+			seenDetectors[id] = struct{}{}
+		}
+	}
 
 	// Start the workers.
 	for i := 0; i < e.concurrency; i++ {
@@ -172,10 +197,14 @@ func Start(ctx context.Context, options ...EngineOption) *Engine {
 // Finish waits for running sources to complete and workers to finish scanning
 // chunks before closing their respective channels. Once Finish is called, no
 // more sources may be scanned by the engine.
-func (e *Engine) Finish(ctx context.Context) {
+func (e *Engine) Finish(ctx context.Context, logFunc func(error, string, ...any)) {
 	defer common.RecoverWithExit(ctx)
 	// wait for the sources to finish putting chunks onto the chunks channel
-	e.sourcesWg.Wait()
+	sourceErr := e.sourcesWg.Wait()
+	if sourceErr != nil {
+		logFunc(sourceErr, "error occurred while collecting chunks")
+	}
+
 	close(e.chunks)
 	// wait for the workers to finish processing all of the chunks and putting
 	// results onto the results channel
@@ -205,6 +234,22 @@ func (e *Engine) BytesScanned() uint64 {
 	return e.bytesScanned
 }
 
+func (e *Engine) dedupeAndSend(chunkResults []detectors.ResultWithMetadata) {
+	dedupeMap := make(map[string]struct{})
+	for _, result := range chunkResults {
+		// dedupe by comparing the detector type, raw result, and source metadata
+		// NOTE: in order for the PLAIN decoder to maintain precedence, make sure UTF8 is the first decoder in the
+		// default decoders list
+		key := fmt.Sprintf("%s%s%s%+v", result.DetectorType.String(), result.Raw, result.RawV2, result.SourceMetadata)
+		if _, ok := dedupeMap[key]; ok {
+			continue
+		}
+		dedupeMap[key] = struct{}{}
+		e.results <- result
+	}
+
+}
+
 func (e *Engine) DetectorAvgTime() map[string][]time.Duration {
 	logger := context.Background().Logger()
 	avgTime := map[string][]time.Duration{}
@@ -229,6 +274,7 @@ func (e *Engine) DetectorAvgTime() map[string][]time.Duration {
 func (e *Engine) detectorWorker(ctx context.Context) {
 	for originalChunk := range e.chunks {
 		for chunk := range sources.Chunker(originalChunk) {
+			var chunkResults []detectors.ResultWithMetadata
 			matchedKeywords := make(map[string]struct{})
 			atomic.AddUint64(&e.bytesScanned, uint64(len(chunk.Data)))
 			for _, decoder := range e.decoders {
@@ -238,20 +284,22 @@ func (e *Engine) detectorWorker(ctx context.Context) {
 					decoderType = detectorspb.DecoderType_PLAIN
 				case *decoders.Base64:
 					decoderType = detectorspb.DecoderType_BASE64
+				case *decoders.UTF16:
+					decoderType = detectorspb.DecoderType_UTF16
 				default:
 					ctx.Logger().Info("unknown decoder type", "type", reflect.TypeOf(decoder).String())
 					decoderType = detectorspb.DecoderType_UNKNOWN
 				}
+
 				decoded := decoder.FromChunk(chunk)
+
 				if decoded == nil {
 					continue
 				}
 
-				dataLower := strings.ToLower(string(decoded.Data))
-				matches := e.prefilter.FindAll(dataLower)
-
-				for _, m := range matches {
-					matchedKeywords[dataLower[m.Start():m.End()]] = struct{}{}
+				// build a map of all keywords that were matched in the chunk
+				for _, m := range e.prefilter.FindAll(string(decoded.Data)) {
+					matchedKeywords[strings.ToLower(string(decoded.Data[m.Start():m.End()]))] = struct{}{}
 				}
 
 				for verify, detectorsSet := range e.detectors {
@@ -289,6 +337,7 @@ func (e *Engine) detectorWorker(ctx context.Context) {
 						}
 						for _, result := range results {
 							resultChunk := chunk
+							ignoreLinePresent := false
 							if SupportsLineNumbers(chunk.SourceType) {
 								copyChunk := *chunk
 								copyMetaDataClone := proto.Clone(chunk.SourceMetadata)
@@ -296,11 +345,14 @@ func (e *Engine) detectorWorker(ctx context.Context) {
 									copyChunk.SourceMetadata = copyMetaData
 								}
 								fragStart, mdLine := FragmentFirstLine(&copyChunk)
-								SetResultLineNumber(&copyChunk, &result, fragStart, mdLine)
+								ignoreLinePresent = SetResultLineNumber(&copyChunk, &result, fragStart, mdLine)
 								resultChunk = &copyChunk
 							}
+							if ignoreLinePresent {
+								continue
+							}
 							result.DecoderType = decoderType
-							e.results <- detectors.CopyMetadata(resultChunk, result)
+							chunkResults = append(chunkResults, detectors.CopyMetadata(resultChunk, result))
 
 						}
 						if len(results) > 0 {
@@ -320,14 +372,15 @@ func (e *Engine) detectorWorker(ctx context.Context) {
 					}
 				}
 			}
+			e.dedupeAndSend(chunkResults)
 		}
 		atomic.AddUint64(&e.chunksScanned, 1)
 	}
 }
 
-// gitSources is a list of sources that utilize the Git source. It is stored this way because slice consts are not
-// supported.
-func gitSources() []sourcespb.SourceType {
+// lineNumberSupportedSources is a list of sources that support line numbers.
+// It is stored this way because slice consts are not supported.
+func lineNumberSupportedSources() []sourcespb.SourceType {
 	return []sourcespb.SourceType{
 		sourcespb.SourceType_SOURCE_TYPE_GIT,
 		sourcespb.SourceType_SOURCE_TYPE_GITHUB,
@@ -336,12 +389,13 @@ func gitSources() []sourcespb.SourceType {
 		sourcespb.SourceType_SOURCE_TYPE_GERRIT,
 		sourcespb.SourceType_SOURCE_TYPE_GITHUB_UNAUTHENTICATED_ORG,
 		sourcespb.SourceType_SOURCE_TYPE_PUBLIC_GIT,
+		sourcespb.SourceType_SOURCE_TYPE_FILESYSTEM,
 	}
 }
 
 // SupportsLineNumbers determines if a line number can be found for a source type.
 func SupportsLineNumbers(sourceType sourcespb.SourceType) bool {
-	for _, i := range gitSources() {
+	for _, i := range lineNumberSupportedSources() {
 		if i == sourceType {
 			return true
 		}
@@ -350,14 +404,18 @@ func SupportsLineNumbers(sourceType sourcespb.SourceType) bool {
 }
 
 // FragmentLineOffset sets the line number for a provided source chunk with a given detector result.
-func FragmentLineOffset(chunk *sources.Chunk, result *detectors.Result) int64 {
+func FragmentLineOffset(chunk *sources.Chunk, result *detectors.Result) (int64, bool) {
 	lines := bytes.Split(chunk.Data, []byte("\n"))
 	for i, line := range lines {
 		if bytes.Contains(line, result.Raw) {
-			return int64(i)
+			// if the line contains the ignore tag, we should ignore the result
+			if bytes.Contains(line, []byte(ignoreTag)) {
+				return int64(i), true
+			}
+			return int64(i), false
 		}
 	}
-	return 0
+	return 0, false
 }
 
 // FragmentFirstLine returns the first line number of a fragment along with a pointer to the value to update in the
@@ -375,6 +433,8 @@ func FragmentFirstLine(chunk *sources.Chunk) (int64, *int64) {
 		fragmentStart = &metadata.Bitbucket.Line
 	case *source_metadatapb.MetaData_Gerrit:
 		fragmentStart = &metadata.Gerrit.Line
+	case *source_metadatapb.MetaData_Filesystem:
+		fragmentStart = &metadata.Filesystem.Line
 	default:
 		return 0, nil
 	}
@@ -382,7 +442,8 @@ func FragmentFirstLine(chunk *sources.Chunk) (int64, *int64) {
 }
 
 // SetResultLineNumber sets the line number in the provided result.
-func SetResultLineNumber(chunk *sources.Chunk, result *detectors.Result, fragStart int64, mdLine *int64) {
-	offset := FragmentLineOffset(chunk, result)
+func SetResultLineNumber(chunk *sources.Chunk, result *detectors.Result, fragStart int64, mdLine *int64) bool {
+	offset, skip := FragmentLineOffset(chunk, result)
 	*mdLine = fragStart + offset
+	return skip
 }
